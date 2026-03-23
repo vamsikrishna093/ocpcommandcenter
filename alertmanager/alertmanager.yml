@@ -1,0 +1,189 @@
+# alertmanager/alertmanager.yml
+# ─────────────────────────────────────────────────────────────
+# Prometheus Alertmanager configuration
+#
+# Alertmanager receives fired alerts from Prometheus and:
+#   1. Groups related alerts together (e.g., same service)
+#   2. Deduplicates repeated alerts (repeat_interval)
+#   3. Routes them to the correct receiver (webhook, email, Slack, etc.)
+#
+# In this AIOps integration:
+#   Prometheus → Alertmanager → compute-agent → xyOps tickets
+#
+# The compute-agent service:
+#   - Receives Alertmanager WebHook payloads (POST /webhook)
+#   - Creates/resolves xyOps incident tickets via xyOps REST API
+#   - Is fully OTel-instrumented → traces appear in Tempo
+#
+# To add Slack/email, add receivers below and route to them.
+# ─────────────────────────────────────────────────────────────
+
+global:
+  # How long to wait before declaring an alert "resolved" if
+  # Alertmanager stops hearing from Prometheus about it.
+  resolve_timeout: 5m
+
+  # (Optional) Default SMTP settings for email notifications.
+  # Uncomment and configure for real email delivery.
+  smtp_smarthost: 'localhost:25'
+  smtp_from: 'alertmanager@localhost'
+  smtp_require_tls: false
+
+# ── Routing tree ──────────────────────────────────────────────
+# All alerts flow through this tree.  The first matching route wins.
+route:
+  # Group alerts that share the same alertname + service_name together
+  # into a single notification instead of one per alert.
+  group_by: ['alertname', 'service_name', 'severity']
+
+  # Wait up to 30 seconds after the first alert fires before sending,
+  # in case more alerts arrive that should be batched together.
+  group_wait: 30s
+
+  # Wait 5 minutes before sending a notification for a group that
+  # already has an open alert (consolidates repeated firings).
+  group_interval: 5m
+
+  # Resend if the alert is still firing after 12 hours.
+  repeat_interval: 12h
+
+  # Default receiver: send everything to xyOps via the bridge
+  receiver: xyops-incidents
+
+  # ── Sub-routes ─────────────────────────────────────────────
+  routes:
+    # AI learning tap: send a copy of EVERY alert to obs-intelligence so it
+    # can learn from all incidents across both domains.  continue: true means
+    # Alertmanager does NOT stop here — it falls through to the domain-specific
+    # routes below and the alert is still handled normally.
+    - receiver: obs-intelligence
+      continue: true
+
+    # Storage alerts (domain=storage) → storage-agent
+    # Must be first so it matches before the generic critical route.
+    - match:
+        domain: storage
+      receiver: storage-incidents
+      group_by: ['alertname', 'domain', 'osd_id', 'pool', 'pvc']
+      group_wait: 20s
+      group_interval: 2m
+      repeat_interval: 4h
+
+    # Critical compute alerts: skip group wait and fire immediately
+    - match:
+        severity: critical
+      group_wait: 10s
+      group_interval: 1m
+      repeat_interval: 1h
+      receiver: xyops-incidents-critical
+      routes:
+        # Fan-out critical alerts to Slack + PagerDuty alongside xyOps
+        - receiver: slack-critical
+          continue: true
+        - receiver: pagerduty-critical
+          continue: true
+
+    # Warning/info alerts: also send a copy to the email receiver
+    - match_re:
+        severity: warning|info
+      receiver: xyops-incidents
+      continue: true
+    - match_re:
+        severity: warning|info
+      receiver: email-all
+
+# ── Inhibit rules ─────────────────────────────────────────────
+# If a critical alert is firing for a service, suppress the
+# warning-level alert for the same service (avoid double tickets).
+inhibit_rules:
+  - source_match:
+      severity: critical
+    target_match:
+      severity: warning
+    equal: ['service_name']
+
+# ── Receivers ─────────────────────────────────────────────────
+receivers:
+
+  # Standard incidents → xyOps via Compute Agent
+  - name: xyops-incidents
+    webhook_configs:
+      - url: 'http://compute-agent:9000/webhook'
+        send_resolved: true   # also send when alert resolves → closes ticket
+        http_config:
+          # No auth needed inside the private Docker network.
+          # In production: use bearer_token or mutual TLS.
+          follow_redirects: true
+        max_alerts: 20        # max alerts per group notification
+
+  # Critical incidents → same compute agent but could route to PagerDuty/OpsGenie
+  - name: xyops-incidents-critical
+    webhook_configs:
+      - url: 'http://compute-agent:9000/webhook'
+        send_resolved: true
+        http_config:
+          follow_redirects: true
+        max_alerts: 20
+    # In enterprise, add a second receiver entry for pagerduty_configs:
+    # pagerduty_configs:
+    #   - routing_key: '<YOUR_PAGERDUTY_INTEGRATION_KEY>'
+    #     description: '{{ .CommonAnnotations.summary }}'
+
+  # Storage incidents → storage-agent
+  # The storage-agent runs its own AI analysis and xyOps pipeline
+  # specialised for Ceph OSD / pool / PVC remediation.
+  - name: storage-incidents
+    webhook_configs:
+      - url: 'http://storage-agent:9001/webhook'
+        send_resolved: true
+
+  # AI learning tap → obs-intelligence
+  # Receives a parallel copy of every alert fired in the system.
+  # obs-intelligence uses this to build cross-domain incident patterns
+  # and improve scenario confidence scores over time.
+  - name: obs-intelligence
+    webhook_configs:
+      - url: 'http://obs-intelligence:9100/webhook'
+        send_resolved: true
+        http_config:
+          follow_redirects: true
+        max_alerts: 50
+
+  # ── Notification integrations (v14.0.0) ───────────────────────
+  # Slack — critical alerts posted to an incident channel.
+  # Set SLACK_WEBHOOK_URL env var or replace the placeholder URL.
+  - name: slack-critical
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/REPLACE/WITH/REAL_WEBHOOK'
+        channel: '#incidents-critical'
+        title: '{{ .CommonAnnotations.summary }}'
+        text: >-
+          *Alert:* {{ .CommonLabels.alertname }}
+          *Severity:* {{ .CommonLabels.severity }}
+          *Service:* {{ .CommonLabels.service_name }}
+          {{ .CommonAnnotations.description }}
+        send_resolved: true
+
+  # PagerDuty — critical alerts trigger an incident.
+  # Replace the routing_key with your PagerDuty Events v2 integration key.
+  - name: pagerduty-critical
+    pagerduty_configs:
+      - routing_key: 'REPLACE_WITH_PAGERDUTY_INTEGRATION_KEY'
+        description: '{{ .CommonAnnotations.summary }}'
+        severity: '{{ .CommonLabels.severity }}'
+        client: 'AIOps Alertmanager'
+        client_url: 'http://localhost:9093'
+
+  # Email — warning/info alerts sent to the on-call distribution list.
+  # Configure global SMTP settings at the top of this file first.
+  - name: email-all
+    email_configs:
+      - to: 'oncall-team@example.com'
+        send_resolved: true
+        headers:
+          Subject: '[AIOps] {{ .CommonLabels.alertname }} — {{ .CommonLabels.severity }}'
+
+# ── Templates ─────────────────────────────────────────────────
+# (Optional) Custom notification templates.
+# templates:
+#   - '/etc/alertmanager/templates/*.tmpl'

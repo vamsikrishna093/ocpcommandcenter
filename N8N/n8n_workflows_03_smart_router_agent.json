@@ -1,0 +1,103 @@
+{
+  "name": "AIOps: Smart Router Agent",
+  "description": "Intelligently routes alerts to different LLM models based on alert characteristics and system load",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "path": "aiops/smart-router",
+        "responseMode": "onReceived"
+      },
+      "id": "webhook-alert",
+      "name": "Webhook: Alert Input",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://prometheus:9090/api/v1/query?query=system:cpu:utilization"
+      },
+      "id": "check-cpu",
+      "name": "Prometheus: Check System CPU",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [500, 150]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://prometheus:9090/api/v1/query?query=system:memory:utilization"
+      },
+      "id": "check-memory",
+      "name": "Prometheus: Check System Memory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://ollama:11434/api/tags"
+      },
+      "id": "check-models",
+      "name": "Ollama: Check Available Models",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [500, 450]
+    },
+    {
+      "parameters": {
+        "jsCode": "const alert = $input.inputs[0].json;\nconst cpu = 50;\nconst mem = 60;\nlet selectedModel = 'qwen3.5';\nlet reason = 'default';\nif (cpu > 80) {\n  selectedModel = 'mistral:latest';\n  reason = 'high_cpu';\n} else if (alert.severity === 'CRITICAL' && mem < 60) {\n  selectedModel = 'llama3.2:latest';\n  reason = 'critical_severity';\n}\nreturn {\n  alert_id: alert.alert_id,\n  model: selectedModel,\n  severity: alert.severity,\n  routing_reason: reason,\n  timestamp: new Date().toISOString()\n};"
+      },
+      "id": "smart-router-logic",
+      "name": "Code: Smart Routing Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [750, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://aiops-bridge:8080/api/ai/analyze",
+        "sendBody": true,
+        "contentType": "application/json",
+        "body": "={\"alert\": $input.json, \"model\": $node[\"smart-router-logic\"].json.model}"
+      },
+      "id": "call-bridge-api",
+      "name": "Bridge: Analyze with Selected Model",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [950, 300]
+    },
+    {
+      "parameters": {},
+      "id": "response-webhook",
+      "name": "Respond: Routing Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1200, 300]
+    }
+  ],
+  "connections": {
+    "webhook-alert": {
+      "main": [[{"node": "check-cpu", "type": "main", "index": 0}, {"node": "check-memory", "type": "main", "index": 0}, {"node": "check-models", "type": "main", "index": 0}]]
+    },
+    "check-cpu": {
+      "main": [[{"node": "smart-router-logic", "type": "main", "index": 0}]]
+    },
+    "check-memory": {
+      "main": [[{"node": "smart-router-logic", "type": "main", "index": 0}]]
+    },
+    "check-models": {
+      "main": [[{"node": "smart-router-logic", "type": "main", "index": 0}]]
+    },
+    "smart-router-logic": {
+      "main": [[{"node": "call-bridge-api", "type": "main", "index": 0}]]
+    },
+    "call-bridge-api": {
+      "main": [[{"node": "response-webhook", "type": "main", "index": 0}]]
+    }
+  }
+}

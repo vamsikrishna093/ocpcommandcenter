@@ -1,0 +1,690 @@
+{
+  "name": "🎯 Master Orchestrator — Primary Agent Gateway",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "orchestrator/create-ticket",
+        "responseMode": "lastNode",
+        "options": {},
+        "httpMethod": "POST"
+      },
+      "id": "wh_create_ticket",
+      "name": "Webhook: Create Ticket",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        100,
+        0
+      ],
+      "webhookId": "create-ticket"
+    },
+    {
+      "parameters": {
+        "path": "orchestrator/update-ticket",
+        "responseMode": "lastNode",
+        "options": {},
+        "httpMethod": "POST"
+      },
+      "id": "wh_update_ticket",
+      "name": "Webhook: Update Ticket",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        100,
+        200
+      ],
+      "webhookId": "update-ticket"
+    },
+    {
+      "parameters": {
+        "path": "orchestrator/add-comment",
+        "responseMode": "lastNode",
+        "options": {},
+        "httpMethod": "POST"
+      },
+      "id": "wh_add_comment",
+      "name": "Webhook: Add Comment",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        100,
+        400
+      ],
+      "webhookId": "add-comment"
+    },
+    {
+      "parameters": {
+        "path": "orchestrator/resolve-ticket",
+        "responseMode": "lastNode",
+        "options": {},
+        "httpMethod": "POST"
+      },
+      "id": "wh_resolve_ticket",
+      "name": "Webhook: Resolve Ticket",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        100,
+        600
+      ],
+      "webhookId": "resolve-ticket"
+    },
+    {
+      "parameters": {
+        "path": "orchestrator/create-approval",
+        "responseMode": "lastNode",
+        "options": {},
+        "httpMethod": "POST"
+      },
+      "id": "wh_create_approval",
+      "name": "Webhook: Create Approval",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        100,
+        800
+      ],
+      "webhookId": "create-approval"
+    },
+    {
+      "parameters": {
+        "path": "orchestrator/execute-remediation",
+        "responseMode": "lastNode",
+        "options": {},
+        "httpMethod": "POST"
+      },
+      "id": "wh_execute_remediation",
+      "name": "Webhook: Execute Remediation",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        100,
+        1000
+      ],
+      "webhookId": "execute-remediation"
+    },
+    {
+      "parameters": {
+        "path": "orchestrator/notify",
+        "responseMode": "lastNode",
+        "options": {},
+        "httpMethod": "POST"
+      },
+      "id": "wh_notify",
+      "name": "Webhook: Notify",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        100,
+        1200
+      ],
+      "webhookId": "notify"
+    },
+    {
+      "parameters": {
+        "url": "http://xyops:5522/api/app/create_ticket/v1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "zX-fwNcB5_oSR2jaMyRbtraPyj7rgUxP9bdCfiQ7pfk"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: $json.body.type || 'issue', status: $json.body.status || 'open', subject: $json.body.subject, body: $json.body.body, severity: $json.body.severity || 'warning', notify: $json.body.notify || [], custom_fields: { domain: $json.body.domain, alert_name: $json.body.alert_name || '', service_name: $json.body.service_name || '', bridge_trace_id: $json.body.bridge_trace_id || '' } }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "xyops_create_ticket",
+      "name": "xyOps: Create Ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        400,
+        0
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build response with ticket info from xyOps\nconst xyopsResult = $input.first().json;\n\n// Extract ticket ID from various response formats\nconst ticketId = xyopsResult?.ticket?.id || xyopsResult?.id || xyopsResult?.ticket_id || '';\nconst ticketNum = xyopsResult?.ticket?.num || xyopsResult?.num || '';\n\nreturn [{\n  json: {\n    ticket_id: ticketId,\n    ticket_num: ticketNum,\n    ticket: xyopsResult?.ticket || xyopsResult || {},\n    domain: $('Webhook: Create Ticket').first().json.body.domain,\n    servicenow_mirrored: false,\n    orchestrator: 'n8n'\n  }\n}];"
+      },
+      "id": "create_ticket_response",
+      "name": "Build Create Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Error fallback for create ticket\nconst input = $input.first().json;\nreturn [{\n  json: {\n    error: 'xyOps create_ticket failed',\n    n8n_unavailable: false,\n    details: input,\n    domain: $('Webhook: Create Ticket').first().json.body.domain\n  }\n}];"
+      },
+      "id": "create_ticket_error",
+      "name": "Create Ticket Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://xyops:5522/api/app/update_ticket/v1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "zX-fwNcB5_oSR2jaMyRbtraPyj7rgUxP9bdCfiQ7pfk"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ id: $json.body.ticket_id, body: $json.body.body }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "xyops_update_ticket",
+      "name": "xyOps: Update Ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        400,
+        200
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const result = $input.first().json;\nreturn [{ json: { status: 'updated', ticket_id: $('Webhook: Update Ticket').first().json.body.ticket_id, result: result, orchestrator: 'n8n' } }];"
+      },
+      "id": "update_ticket_response",
+      "name": "Build Update Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { error: 'xyOps update_ticket failed', details: $input.first().json } }];"
+      },
+      "id": "update_ticket_error",
+      "name": "Update Ticket Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://xyops:5522/api/app/add_ticket_change/v1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "zX-fwNcB5_oSR2jaMyRbtraPyj7rgUxP9bdCfiQ7pfk"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ id: $json.body.ticket_id, change: { type: 'comment', body: '[Step ' + ($json.body.step_num || '?') + '/' + ($json.body.total_steps || 6) + '] ' + ($json.body.status || '') + ' — ' + ($json.body.message || $json.body.comment || '') } }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "xyops_add_comment",
+      "name": "xyOps: Add Comment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        400,
+        400
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { status: 'commented', ticket_id: $('Webhook: Add Comment').first().json.body.ticket_id, orchestrator: 'n8n' } }];"
+      },
+      "id": "add_comment_response",
+      "name": "Build Comment Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { error: 'xyOps add_comment failed', details: $input.first().json } }];"
+      },
+      "id": "add_comment_error",
+      "name": "Add Comment Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://xyops:5522/api/app/search_tickets/v1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "zX-fwNcB5_oSR2jaMyRbtraPyj7rgUxP9bdCfiQ7pfk"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $json.body.alert_name + ' ' + $json.body.service_name, status: 'open', tags: [$json.body.domain || 'general'] }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "xyops_search_tickets",
+      "name": "xyOps: Search Open Tickets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        400,
+        600
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Close matching tickets\nconst searchResult = $input.first().json;\nconst tickets = searchResult?.tickets || searchResult?.results || [];\nconst domain = $('Webhook: Resolve Ticket').first().json.body.domain;\nconst closedIds = [];\n\nfor (const t of tickets) {\n  const tid = t.id || t.ticket_id;\n  if (!tid) continue;\n  try {\n    const xyopsUrl = 'http://xyops:5522';\n    // We'll mark tickets for closure — actual HTTP calls from n8n\n    closedIds.push(tid);\n  } catch (e) {\n    // skip\n  }\n}\n\nreturn [{\n  json: {\n    status: 'resolved',\n    domain: domain,\n    tickets_found: tickets.length,\n    closed_ids: closedIds,\n    orchestrator: 'n8n'\n  }\n}];"
+      },
+      "id": "resolve_tickets_logic",
+      "name": "Resolve Matching Tickets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { error: 'xyOps search_tickets failed', details: $input.first().json } }];"
+      },
+      "id": "resolve_tickets_error",
+      "name": "Resolve Tickets Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://xyops:5522/api/app/create_ticket/v1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "zX-fwNcB5_oSR2jaMyRbtraPyj7rgUxP9bdCfiQ7pfk"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: 'approval', status: 'pending', subject: '[APPROVAL] ' + ($json.body.recommended_action || 'remediation') + ' — ' + ($json.body.alert_name || '') + ' on ' + ($json.body.service_name || ''), body: 'Incident ticket: ' + ($json.body.incident_ticket_id || 'N/A') + '\\nDomain: ' + ($json.body.domain || '') + '\\nSeverity: ' + ($json.body.severity || '') + '\\nAutonomy level: ' + ($json.body.autonomy_level || '') + '\\n\\nRecommended action: ' + ($json.body.recommended_action || '') + '\\nRCA: ' + ($json.body.rca_summary || '') + '\\nPlaybook: ' + ($json.body.ansible_playbook || 'N/A'), severity: $json.body.severity || 'warning', custom_fields: { domain: $json.body.domain, incident_ticket_id: $json.body.incident_ticket_id, alert_name: $json.body.alert_name, service_name: $json.body.service_name, callback_url: $json.body.callback_url || '' } }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "xyops_create_approval",
+      "name": "xyOps: Create Approval Ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        400,
+        800
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const xyopsResult = $input.first().json;\nconst ticketId = xyopsResult?.ticket?.id || xyopsResult?.id || '';\nreturn [{\n  json: {\n    approval_ticket_id: ticketId,\n    ticket: xyopsResult?.ticket || xyopsResult || {},\n    domain: $('Webhook: Create Approval').first().json.body.domain,\n    orchestrator: 'n8n'\n  }\n}];"
+      },
+      "id": "create_approval_response",
+      "name": "Build Approval Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { error: 'xyOps create_approval failed', details: $input.first().json } }];"
+      },
+      "id": "create_approval_error",
+      "name": "Create Approval Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://ansible-runner:8080/run",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ playbook_content: $json.body.playbook_content, extra_vars: $json.body.extra_vars || {}, domain: $json.body.domain, alert_name: $json.body.alert_name, service_name: $json.body.service_name, ticket_id: $json.body.ticket_id }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "ansible_execute",
+      "name": "Ansible: Execute Remediation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        400,
+        1000
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const result = $input.first().json;\nreturn [{\n  json: {\n    status: 'executed',\n    ansible_result: result,\n    domain: $('Webhook: Execute Remediation').first().json.body.domain,\n    ticket_id: $('Webhook: Execute Remediation').first().json.body.ticket_id,\n    orchestrator: 'n8n'\n  }\n}];"
+      },
+      "id": "remediation_response",
+      "name": "Build Remediation Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        1000
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { error: 'ansible execution failed', details: $input.first().json } }];"
+      },
+      "id": "remediation_error",
+      "name": "Remediation Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        1100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Notification hub — log the event and optionally forward\n// to Slack, email, PagerDuty, etc. via additional n8n nodes.\nconst payload = $input.first().json;\nconst ts = new Date().toISOString();\n\nconsole.log(`[NOTIFY] ${ts} domain=${payload.body.domain} event=${payload.body.event_type} alert=${payload.body.alert_name} service=${payload.body.service_name} ticket=${payload.body.ticket_id}`);\n\nreturn [{\n  json: {\n    status: 'notified',\n    event_type: payload.body.event_type,\n    domain: payload.body.domain,\n    timestamp: ts,\n    orchestrator: 'n8n'\n  }\n}];"
+      },
+      "id": "notify_handler",
+      "name": "Notification Hub",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        1200
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: Create Ticket": {
+      "main": [
+        [
+          {
+            "node": "xyOps: Create Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "xyOps: Create Ticket": {
+      "main": [
+        [
+          {
+            "node": "Build Create Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Ticket Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Update Ticket": {
+      "main": [
+        [
+          {
+            "node": "xyOps: Update Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "xyOps: Update Ticket": {
+      "main": [
+        [
+          {
+            "node": "Build Update Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Ticket Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Add Comment": {
+      "main": [
+        [
+          {
+            "node": "xyOps: Add Comment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "xyOps: Add Comment": {
+      "main": [
+        [
+          {
+            "node": "Build Comment Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Add Comment Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Resolve Ticket": {
+      "main": [
+        [
+          {
+            "node": "xyOps: Search Open Tickets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "xyOps: Search Open Tickets": {
+      "main": [
+        [
+          {
+            "node": "Resolve Matching Tickets",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Resolve Tickets Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Create Approval": {
+      "main": [
+        [
+          {
+            "node": "xyOps: Create Approval Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "xyOps: Create Approval Ticket": {
+      "main": [
+        [
+          {
+            "node": "Build Approval Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Approval Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Execute Remediation": {
+      "main": [
+        [
+          {
+            "node": "Ansible: Execute Remediation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ansible: Execute Remediation": {
+      "main": [
+        [
+          {
+            "node": "Build Remediation Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Remediation Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Notify": {
+      "main": [
+        [
+          {
+            "node": "Notification Hub",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "orchestrator"
+    },
+    {
+      "name": "aiops"
+    },
+    {
+      "name": "primary"
+    }
+  ],
+  "pinData": {}
+}

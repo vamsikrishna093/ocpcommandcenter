@@ -1,0 +1,205 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Git Ignore Configuration — SENSITIVE DATA PROTECTION
+# ═══════════════════════════════════════════════════════════════════════════
+# This file prevents API keys, passwords, and sensitive data from GitHub
+#
+# ⚠️  IMPORTANT: Never commit credentials, secrets, or API keys!
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────────────
+# ENVIRONMENT FILES & SECRETS (CRITICAL ⚠️)
+# ─────────────────────────────────────────────────────────────────────────
+.env                           # Main environment file with secrets
+.env.local                      # Local environment overrides
+.env.*.local                    # Environment-specific files
+.env.production                 # Production secrets
+.env.staging                    # Staging secrets
+.env.development               # Development secrets
+*.env                          # Any .env files
+!.env.template                 # Template IS tracked (example)
+secrets.yaml                   # Secret configuration files
+secrets.json
+secrets/
+*.secret.*
+.vault-token
+
+# ─────────────────────────────────────────────────────────────────────────
+# CREDENTIALS & API KEYS
+# ─────────────────────────────────────────────────────────────────────────
+*.key
+*.pem
+*.p8
+*.p12
+*.pfx
+.ssh/
+.gnupg/
+.gpg/
+.aws/
+.gcp/
+.azure/
+credentials.json
+*.credentials
+*_key
+*_secret
+*_password
+
+# ─────────────────────────────────────────────────────────────────────────
+# PYTHON ARTIFACTS
+# ─────────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+pip-log.txt
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+*.xml
+.tox/
+.nox/
+.hypothesis/
+
+# ─────────────────────────────────────────────────────────────────────────
+# VIRTUAL ENVIRONMENTS
+# ─────────────────────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.env/
+local_env.py
+
+# ─────────────────────────────────────────────────────────────────────────
+# DOCKER VOLUMES & DATA
+# ─────────────────────────────────────────────────────────────────────────
+grafana-data/
+loki-data/
+prometheus-data/
+tempo-data/
+xyops-data/
+gitea-data/
+compute-agent-data/
+obs-intelligence-data/
+ui-backend-data/
+troublemaker-data/
+
+# ─────────────────────────────────────────────────────────────────────────
+# DATABASE FILES
+# ─────────────────────────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+*.rdb
+db.sqlite3
+*.bak
+*.backup
+
+# ─────────────────────────────────────────────────────────────────────────
+# LOG FILES
+# ─────────────────────────────────────────────────────────────────────────
+*.log
+*.logs
+logs/
+log/
+build-log.txt
+debug.log
+error.log
+
+# ─────────────────────────────────────────────────────────────────────────
+# IDE & EDITOR CONFIGURATION
+# ─────────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+.atom/
+.history/
+
+# ─────────────────────────────────────────────────────────────────────────
+# OS-SPECIFIC
+# ─────────────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# ─────────────────────────────────────────────────────────────────────────
+# NODE.JS & FRONTEND
+# ─────────────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+dist/
+
+# ─────────────────────────────────────────────────────────────────────────
+# TEMPORARY & CACHE FILES
+# ─────────────────────────────────────────────────────────────────────────
+.cache/
+*.cache
+*.tmp
+.temp/
+
+# ─────────────────────────────────────────────────────────────────────────
+# CI/CD ARTIFACTS
+# ─────────────────────────────────────────────────────────────────────────
+.github/workflows/secrets/
+terraform.tfstate*
+
+# ─────────────────────────────────────────────────────────────────────────
+# BACKUP & ARCHIVE FILES
+# ─────────────────────────────────────────────────────────────────────────
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+*-backup/
+*.old
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EXCEPTIONS (Files that SHOULD be tracked)
+# ═══════════════════════════════════════════════════════════════════════════
+!.env.template                 # Environment template (example config)
+!.gitignore                    # This file itself
+!docs/                         # Documentation
+!.github/                      # GitHub workflows
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SETUP INSTRUCTIONS
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# 1. Create your .env file from the template:
+#    $ cp .env.template .env
+#
+# 2. Fill in real values in .env (this file is protected)
+#
+# 3. Verify .env is not tracked:
+#    $ git status
+#    # If you see .env, run:
+#    $ git rm --cached .env
+#    $ git commit -m "Remove .env from tracking"
+#
+# 4. Never use `git add .env` - always use .env.template instead
+#
+# ═══════════════════════════════════════════════════════════════════════════
+.venv*/

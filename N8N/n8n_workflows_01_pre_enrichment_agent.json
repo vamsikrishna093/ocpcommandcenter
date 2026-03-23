@@ -1,0 +1,138 @@
+{
+  "name": "AIOps: Pre-Enrichment Agent",
+  "description": "Enriches alerts before sending to AIOps Bridge for AI analysis. Adds team info, severity routing, and metadata.",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "path": "aiops/pre-enrichment",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook: AlertManager",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "webhook_aiops_pre_enrichment"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract and enrich alert metadata\nconst alert = $input.first().json;\nconst enrichment = {\n  team: alert.labels?.team || 'ops-default',\n  service: alert.labels?.service || 'unknown',\n  owner_email: alert.labels?.owner_email || 'ops@company.com',\n  pagerduty_service_id: alert.labels?.pagerduty_id || null,\n  escalation_policy: alert.severity === 'CRITICAL' ? 'urgent' : 'standard',\n  auto_remediate: alert.labels?.auto_remediate === 'true',\n  tags: (alert.labels?.tags || '').split(',').map(t => t.trim()),\n  cmdb_lookup: {\n    service_id: 'svc_' + (alert.labels?.service || 'unknown'),\n    app_tier: alert.labels?.tier || 'backend',\n    environment: alert.labels?.env || 'production'\n  }\n};\n\nreturn {\n  ...alert,\n  enrichment_data: enrichment,\n  enrichment_timestamp: new Date().toISOString()\n};"
+      },
+      "id": "enrich-metadata",
+      "name": "Enrich: Extract Metadata",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "requestMethod": "POST",
+        "url": "http://cmdb-api:8080/api/services",
+        "sendBody": true,
+        "bodyContentType": "form",
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"service\": \"{{$node[\\\"enrich-metadata\\\"].json[\\\"enrichment_data\\\"][\\\"service\\\"]}}\",\n  \"include_history\": true\n}"
+      },
+      "id": "cmdb-lookup",
+      "name": "CMDB: Lookup Service",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [750, 200],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge CMDB data into enrichment\nconst enriched = $input.first().json;\nconst cmdbData = $input.last().json || {};\n\nreturn {\n  ...enriched,\n  enrichment_data: {\n    ...enriched.enrichment_data,\n    cmdb_data: {\n      service_owner: cmdbData.owner_name,\n      service_tier: cmdbData.tier,\n      dependencies: cmdbData.dependencies || [],\n      oncall_rotation: cmdbData.oncall_engineer || null\n    }\n  }\n};"
+      },
+      "id": "merge-cmdb",
+      "name": "Merge: CMDB Enrichment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [950, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://aiops-bridge:8080/api/alert/process",
+        "authentication": "bearerToken",
+        "nodeCredentialType": "httpBearer",
+        "sendBody": true,
+        "contentType": "application/json",
+        "body": "={{JSON.stringify($input.all())}}"
+      },
+      "id": "send-to-bridge",
+      "name": "Send: To AIOps Bridge",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {},
+      "id": "response",
+      "name": "Respond: Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    }
+  ],
+  "connections": {
+    "webhook-trigger": {
+      "main": [
+        [
+          {
+            "node": "enrich-metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "enrich-metadata": {
+      "main": [
+        [
+          {
+            "node": "cmdb-lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "cmdb-lookup": {
+      "main": [
+        [
+          {
+            "node": "merge-cmdb",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "merge-cmdb": {
+      "main": [
+        [
+          {
+            "node": "send-to-bridge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "send-to-bridge": {
+      "main": [
+        [
+          {
+            "node": "response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

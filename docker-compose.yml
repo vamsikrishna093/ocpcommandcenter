@@ -1,0 +1,1506 @@
+# docker-compose.yml
+# ------------------
+# Observability Learning Project — Application Layer + OTel Collector + Prometheus + Tempo + Loki + Grafana
+#
+# Services:
+#   otel-collector — OpenTelemetry Collector  (receives all telemetry)
+#   prometheus     — Prometheus TSDB          (scrapes metrics from collector)
+#   tempo          — Grafana Tempo            (stores distributed traces)
+#   loki           — Grafana Loki             (stores logs)
+#   grafana        — Grafana                  (visualises metrics, traces, and logs)
+#   backend-api    — Backend FastAPI service   (host port 8081)
+#   frontend-api   — Frontend FastAPI service  (host port 8080)
+#   loadgen        — Optional steady traffic generator (opt-in via profile)
+#   troublemaker   — Optional chaos traffic generator  (opt-in via profile)
+#
+# Data flow (metrics):
+#   frontend-api ──OTLP/gRPC──┐
+#                              ▼
+#                       otel-collector  (receives on port 4317)
+#                              │
+#                     prometheus exporter
+#                       (port 8889)  ← Prometheus scrapes every 15 s
+#                              │
+#   backend-api  ──OTLP/gRPC──┘      Prometheus TSDB  (port 9090)
+#
+# Data flow (traces):
+#   frontend-api ──OTLP/gRPC──┐
+#                              ▼
+#                       otel-collector  (port 4317)
+#                              │ otlp/tempo exporter
+#   backend-api  ──OTLP/gRPC──┘      Tempo  (port 3200 query API)
+#
+# Data flow (logs):
+#   frontend-api ──OTLP/gRPC──┐
+#                              ▼
+#                       otel-collector  (port 4317)
+#                              │ loki exporter
+#   backend-api  ──OTLP/gRPC──┘      Loki  (port 3100 query API)
+#
+# Data flow (visualisation + cross-linking):
+#   Grafana ──PromQL──► Prometheus  (metrics panels, exemplars → trace_id)
+#   Grafana ──Tempo API──► Tempo    (trace waterfall, TraceQL search)
+#   Grafana ──LogQL──► Loki         (logs panel, derived trace_id → Tempo link)
+#
+#   Cross-links enabled automatically:
+#     Prometheus exemplar  → click trace_id → opens Tempo waterfall
+#     Tempo span           → "Logs for this span" → opens Loki LogQL query
+#     Loki log line        → "View Trace in Tempo" → opens Tempo waterfall
+#
+# ─────────────────────────────────────────────────────────────
+# Usage
+# ─────────────────────────────────────────────────────────────
+#   Build and start:
+#     docker compose up --build
+#
+#   Build and start WITH load generator:
+#     docker compose --profile loadgen up --build
+#
+#   Build and start WITH chaos generator (troublemaker):
+#     docker compose --profile troublemaker up --build
+#
+#   Run both load generator and troublemaker together:
+#     docker compose --profile loadgen --profile troublemaker up --build
+#
+#   Watch troublemaker scenarios as they run:
+#     docker compose logs -f troublemaker
+#
+#   View scenario schedule table (CSV — all recorded chaos events):
+#     curl http://localhost:8088/scenarios
+#
+#   View scenario schedule table (JSON):
+#     curl 'http://localhost:8088/scenarios?json'
+#
+#   Watch collector receive and forward spans:
+#     docker compose logs -f otel-collector
+#
+#   Watch Tempo ingest traces:
+#     docker compose logs -f tempo
+#
+#   Watch Loki ingest logs:
+#     docker compose logs -f loki
+#
+#   Check Loki is ready:
+#     curl http://localhost:3100/ready
+#
+#   Query recent logs from frontend-api (last 1 hour):
+#     curl -G http://localhost:3100/loki/api/v1/query_range \
+#       --data-urlencode 'query={service_name="frontend-api"}' \
+#       --data-urlencode 'limit=20'
+#
+#   List all Loki label names:
+#     curl http://localhost:3100/loki/api/v1/labels
+#
+#   Open Grafana (login: admin / admin):
+#     http://localhost:3000
+#
+#   Open Prometheus UI:
+#     http://localhost:9090
+#
+#   Check Tempo is ready:
+#     curl http://localhost:3200/ready
+#
+#   Look up a trace by ID (replace <id> with a real trace_id):
+#     curl http://localhost:3200/api/traces/<id>
+#
+#   Verify the collector's prometheus scrape endpoint directly:
+#     curl http://localhost:8889/metrics
+#
+#   Open collector debug UI (zPages):
+#     http://localhost:55679/debug/pipelinez
+#
+#   Collector health check:
+#     curl http://localhost:13133/
+#
+#   Stop everything:
+#     docker compose down
+#
+#   Stop and delete ALL stored data (Prometheus + Tempo + Loki + Grafana):
+#     docker compose down -v
+#
+# ─────────────────────────────────────────────────────────────
+# OpenTelemetry environment variables
+# ─────────────────────────────────────────────────────────────
+# OTEL_SERVICE_NAME
+#   The name that appears on every span and metric.
+#
+# OTEL_EXPORTER_OTLP_ENDPOINT
+#   Now points to the collector container on the obs-net network.
+#   Format for gRPC:  http://otel-collector:4317
+#   Format for HTTP:  http://otel-collector:4318
+#
+# OTEL_EXPORTER_OTLP_PROTOCOL
+#   "grpc" (default) or "http/protobuf".
+#
+# OTEL_RESOURCE_ATTRIBUTES
+#   Extra key=value pairs attached to every span and metric.
+#
+# OTEL_METRIC_EXPORT_INTERVAL_MS
+#   How often the app pushes metrics to the collector (milliseconds).
+#   Set to 15000 (15 s) to align with Prometheus scrape_interval: 15s.
+# ─────────────────────────────────────────────────────────────
+
+#version: "3.9"
+
+# Shared Docker network.  All containers resolve each other by service name.
+networks:
+  obs-net:
+    driver: bridge
+    name: obs-net
+
+services:
+
+  # ──────────────────────────────────────────────────────────
+  # OpenTelemetry Collector
+  #
+  # Central telemetry hub.  Every application ships spans, metrics,
+  # and logs here over OTLP.  The collector processes them through
+  # a pipeline and currently exports to its own logs (debug exporter)
+  # so you can verify data is flowing with:
+  #   docker compose logs -f otel-collector
+  #
+  # Ports
+  # ─────
+  #   4317  OTLP/gRPC receiver  ← apps send telemetry here
+  #   4318  OTLP/HTTP receiver  ← alternative transport
+  #   8888  Collector self-metrics (Prometheus format)  ← Prometheus scrapes
+  #   8889  App metrics scrape endpoint (prometheus exporter)  ← Prometheus scrapes
+  #   13133 Health check endpoint  GET / → 200 OK when ready
+  #   55679 zPages debug UI  http://localhost:55679/debug/pipelinez
+  #
+  # Configuration file
+  # ──────────────────
+  # ./otel-collector/config.yaml is bind-mounted read-only into the
+  # container.  Edit it and restart the collector to apply changes:
+  #   docker compose restart otel-collector
+  # ──────────────────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.118.0
+    container_name: otel-collector
+    hostname: otel-collector
+    # Pass the config file path explicitly so it is unambiguous.
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      # Bind-mount the config file.  :ro prevents the container from
+      # accidentally writing to it.
+      - ./otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"    # OTLP gRPC  — apps push telemetry here
+      - "4318:4318"    # OTLP HTTP  — alternative for HTTP/protobuf clients
+      - "8888:8888"    # Collector self-metrics      (scraped by Prometheus)
+      - "8889:8889"    # App metrics scrape endpoint (scraped by Prometheus)
+      - "13133:13133"  # Health check  curl http://localhost:13133/
+      - "55679:55679"  # zPages UI     http://localhost:55679/debug/pipelinez
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Prometheus
+  #
+  # Time-series database (TSDB) that SCRAPES metrics from targets.
+  # Prometheus uses a pull model: it periodically sends HTTP GET
+  # requests to /metrics endpoints and stores the samples it receives.
+  #
+  # Why scrape the collector instead of scraping the apps directly?
+  # ────────────────────────────────────────────────────────────────
+  # The apps already push OTLP metrics to the collector over gRPC.
+  # They do NOT expose a Prometheus /metrics endpoint.  The collector's
+  # "prometheus" exporter receives those OTLP metrics and serves them
+  # in Prometheus exposition format on port 8889.  Prometheus scrapes
+  # the collector — not the apps — so we get one scrape target per
+  # signal type instead of one target per app.
+  #
+  # This architecture also teaches both models in one stack:
+  #   apps → collector   (push, OTLP)
+  #   Prometheus → collector  (pull, HTTP scrape)
+  #
+  # Two scrape jobs are defined in prometheus/prometheus.yml:
+  #   app-metrics             → otel-collector:8889  (your app counters etc.)
+  #   otel-collector-internal → otel-collector:8888  (collector health metrics)
+  #
+  # Ports
+  # ─────
+  #   9090  Prometheus web UI and query API  http://localhost:9090
+  #
+  # Useful UI pages
+  # ───────────────
+  #   http://localhost:9090/targets          — scrape target health
+  #   http://localhost:9090/graph            — ad-hoc PromQL queries
+  #   http://localhost:9090/metrics          — Prometheus self-metrics
+  #
+  # Persistent storage
+  # ──────────────────
+  # Metric samples are written to the "prometheus-data" named volume.
+  # The volume survives "docker compose down" but is deleted by
+  # "docker compose down -v".  This gives you history across restarts
+  # while keeping it easy to start fresh when needed.
+  #
+  # Reload config without restarting:
+  #   curl -X POST http://localhost:9090/-/reload
+  #   (requires --web.enable-lifecycle flag, already set below)
+  # ──────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    container_name: prometheus
+    hostname: prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      # How long to keep samples.  7 days is enough for a learning lab.
+      - "--storage.tsdb.retention.time=7d"
+      # Enables POST /-/reload to hot-reload the config file.
+      - "--web.enable-lifecycle"
+    volumes:
+      # Config file (read-only bind mount)
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Alert rules file — defines WHEN to fire alerts to Alertmanager
+      - ./prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      # Persistent TSDB storage
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"    # Prometheus UI  http://localhost:9090
+    depends_on:
+      - otel-collector
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Tempo
+  #
+  # Distributed trace storage backend.
+  # Tempo receives completed traces from the OTel Collector and stores
+  # them on disk.  You can then query individual traces by trace_id through
+  # the Tempo HTTP API, or later through Grafana's Tempo data source.
+  #
+  # How spans arrive here:
+  #   apps ──OTLP/gRPC─► collector :4317
+  #   collector ──otlp/tempo exporter─► Tempo :4317 (internal)
+  #   Tempo ─► WAL ─► block storage (tempo-data volume)
+  #
+  # Why is the app-facing port (4317) not exposed on the host?
+  # ───────────────────────────────────────────────────────
+  # The otel-collector already exposes port 4317 on the host for app traffic.
+  # Exposing Tempo's 4317 on the host too would cause a port collision.
+  # Tempo's OTLP receiver is only reachable inside obs-net, which is all
+  # the collector needs.  Only the query API (3200) is exposed to the host.
+  #
+  # Ports
+  # ─────
+  #   3200  Tempo HTTP query API  (exposed on host)
+  #         Health:  curl http://localhost:3200/ready
+  #         Trace:   curl http://localhost:3200/api/traces/<trace_id>
+  #
+  # Internal (not exposed on host):
+  #   4317  OTLP/gRPC receiver  ← otel-collector sends spans here
+  #   9095  Tempo internal gRPC (component-to-component communication)
+  #
+  # Configuration
+  # ─────────────
+  # ./tempo/tempo.yaml is bind-mounted read-only.
+  # Restart Tempo to pick up config changes:
+  #   docker compose restart tempo
+  #
+  # Persistent storage
+  # ──────────────────
+  # Trace blocks are written to the "tempo-data" named volume.
+  # They survive "docker compose down" but are deleted by
+  # "docker compose down -v".
+  # ──────────────────────────────────────────────────────────
+  tempo:
+    image: grafana/tempo:2.7.2
+    container_name: tempo
+    hostname: tempo
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"    # Tempo HTTP query API  http://localhost:3200/ready
+      # Port 4317 (OTLP/gRPC) is intentionally NOT exposed on the host.
+      # The collector reaches it as "tempo:4317" inside obs-net.
+      # Exposing it on the host would conflict with otel-collector's 4317.
+    depends_on:
+      - otel-collector
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Loki
+  #
+  # Log aggregation and storage backend.
+  # Loki receives log records from the OTel Collector's loki exporter and
+  # stores them as compressed chunks indexed by stream labels.
+  #
+  # How logs arrive here:
+  #   apps ──stdlib logging + OTel LoggingHandler─► collector :4317
+  #   collector ──loki exporter─► POST http://loki:3100/loki/api/v1/push
+  #   Loki ─► WAL ─► chunks ─► /var/loki (loki-data volume)
+  #
+  # Log streams in this project:
+  #   {service_name="frontend-api", deployment_environment="local"}
+  #   {service_name="backend-api",  deployment_environment="local"}
+  #
+  # Why only those two labels?
+  # ────────────────────────
+  # Labels are indexed.  Each unique label value combination = a new stream.
+  # Keep labels low-cardinality.  trace_id/request_id go IN the log line.
+  # Query them with LogQL:  {service_name="frontend-api"} |= "trace_id=abc"
+  #
+  # Ports
+  # ─────
+  #   3100  Loki HTTP API  (exposed on host)
+  #         Ready:         curl http://localhost:3100/ready
+  #         Query:         curl http://localhost:3100/loki/api/v1/query_range
+  #         Labels:        curl http://localhost:3100/loki/api/v1/labels
+  #
+  # Internal (not exposed on host):
+  #   9096  Loki internal gRPC (component-to-component communication)
+  #
+  # Persistent storage
+  # ──────────────────
+  # Log chunks are written to the "loki-data" named volume.
+  # They survive "docker compose down" but are deleted by
+  # "docker compose down -v".
+  # ──────────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:3.4.2
+    container_name: loki
+    hostname: loki
+    user: "0"
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/var/loki
+    ports:
+      - "3100:3100"    # Loki HTTP API  http://localhost:3100/ready
+      # Port 9096 (internal gRPC) is NOT exposed on the host.
+    depends_on:
+      - otel-collector
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Grafana
+  #
+  # Visualisation and correlation layer.  Grafana queries Prometheus,
+  # Tempo, and Loki and cross-links signals via a shared trace_id:
+  #
+  #   Prometheus exemplar → click trace_id  → Tempo waterfall
+  #   Tempo span          → Logs for span   → Loki LogQL
+  #   Loki log line       → View Trace link → Tempo waterfall
+  #
+  # All three datasources are auto-provisioned from
+  # ./grafana/provisioning/datasources/datasources.yaml — no manual
+  # UI setup required.  The starter dashboard is provisioned from
+  # ./grafana/provisioning/dashboards/obs-overview.json.
+  #
+  # Ports
+  # ─────
+  #   3000  Grafana web UI  http://localhost:3000
+  #         Default login:  admin / admin
+  #
+  # Persistent storage
+  # ──────────────────
+  # Grafana state (user prefs, manually saved dashboards) is written to
+  # the "grafana-data" named volume.  Provisioned datasources and
+  # dashboards are always re-applied from the bind-mount on startup.
+  # ──────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: grafana
+    hostname: grafana
+    volumes:
+      # All provisioning config (datasources + dashboard manifests + JSON files).
+      # Read-only so Grafana cannot overwrite the source files.
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      # Persistent Grafana state (sqlite DB, sessions, user preferences).
+      - grafana-data:/var/lib/grafana
+    environment:
+      # Admin credentials  (change in production!)
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Allow anonymous read-only access so you can browse without logging in.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # Disable the "install plugins" prompt in the UI.
+      GF_INSTALL_PLUGINS: ""
+    ports:
+      - "3001:3000"    # Grafana UI  http://localhost:3001
+                       # (port 3001 avoids conflict with host Grafana on 3000)
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Backend API
+  #   - In-memory fake datastore
+  #   - Healthy / slow / error endpoints
+  #   - Reachable inside the network as "backend-api"
+  # ──────────────────────────────────────────────────────────
+  backend-api:
+    build:
+      context: ./backend-api
+      dockerfile: Dockerfile
+    container_name: backend-api
+    hostname: backend-api
+    ports:
+      - "8081:8081"        # also exposed on host for direct curl testing
+    environment:
+      # ── App config ─────────────────────────────────────────
+      BACKEND_SLOW_MS: "1500"
+
+      # ── OTel identity ──────────────────────────────────────
+      OTEL_SERVICE_NAME: "backend-api"
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=local,service.namespace=obs-learning"
+
+      # ── OTel export → collector ────────────────────────────
+      # Collector is reachable by its service name on obs-net.
+      # gRPC port 4317 is the OTLP standard.
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+      OTEL_METRIC_EXPORT_INTERVAL_MS: "15000"
+    depends_on:
+      # Ensure the collector is up before the app starts, so the first
+      # batch of spans is not lost to a "connection refused" error.
+      - otel-collector
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Frontend API
+  #   - User-facing endpoints
+  #   - Calls backend-api over the obs-net Docker network
+  #   - Primary entry point for curl / browser / loadgen
+  # ──────────────────────────────────────────────────────────
+  frontend-api:
+    build:
+      context: ./frontend-api
+      dockerfile: Dockerfile
+    container_name: frontend-api
+    hostname: frontend-api
+    ports:
+      - "8080:8080"        # exposed on host for testing
+    environment:
+      # ── App config ─────────────────────────────────────────
+      FRONTEND_SLOW_MS: "800"
+      BACKEND_URL: "http://backend-api:8081"
+
+      # ── OTel identity ──────────────────────────────────────
+      OTEL_SERVICE_NAME: "frontend-api"
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=local,service.namespace=obs-learning"
+
+      # ── OTel export → collector ────────────────────────────
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+      OTEL_METRIC_EXPORT_INTERVAL_MS: "15000"
+    depends_on:
+      - backend-api
+      - otel-collector
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Load Generator  (OPTIONAL — only starts when profile is active)
+  #
+  #   Start with:  docker compose --profile loadgen up --build
+  #
+  #   It generates a continuous stream of requests to the frontend,
+  #   which is exactly what you need later to see meaningful data
+  #   in Prometheus / Grafana / Tempo dashboards.
+  # ──────────────────────────────────────────────────────────
+  loadgen:
+    build:
+      context: ./loadgen
+      dockerfile: Dockerfile
+    container_name: loadgen
+    hostname: loadgen
+    environment:
+      FRONTEND_URL: "http://frontend-api:8080"    # resolved via Docker network
+      LOADGEN_INTERVAL_MS: "2000"                 # pause between requests (milliseconds)
+    depends_on:
+      - frontend-api
+    networks:
+      - obs-net
+    restart: unless-stopped
+    profiles:
+      - loadgen   # opt-in: won't start with plain "docker compose up"
+
+  # ──────────────────────────────────────────────────────────
+  # Troublemaker  (OPTIONAL — only starts when profile is active)
+  #
+  #   Start with:  docker compose --profile troublemaker up --build
+  #
+  # This container runs a continuous chaos loop that picks one of eight
+  # traffic scenarios at random and fires HTTP requests at the frontend-api.
+  # The goal is to produce rich, realistic telemetry so you can practice
+  # reading Prometheus metrics, Loki logs, and Tempo traces under real
+  # failure conditions without having to trigger them manually.
+  #
+  # Scenarios
+  # ─────────
+  #   steady_normal    Healthy baseline — flat request rate, low latency.
+  #   burst_traffic    Sudden request spike — rate graph vertical rise.
+  #   latency_spike    Floods /slow + /backend-slow — p95/p99 diverge.
+  #   error_spike      Floods /error — error counter spikes.
+  #   backend_failure  Floods /backend-error — 3-span ERROR waterfall in Tempo.
+  #   slow_backend     Floods /backend-slow — shows downstream latency blame.
+  #   mixed_chaos      Random mix of all endpoints — realistic noise.
+  #   slow_burn        Alternating normal/slow rounds — gradual latency drift.
+  #
+  # Tuning environment variables
+  # ────────────────────────────
+  #   MIN_SLEEP_SECONDS / MAX_SLEEP_SECONDS — idle gap between rounds
+  #   BURST_MIN / BURST_MAX                — request count for burst scenario
+  #   STEADY_REQUESTS                      — request count for normal scenarios
+  #   ENABLE_BURSTS / ENABLE_ERRORS / ENABLE_SLOW_CALLS — feature flags
+  #   SCHEDULE_CSV_PATH                    — CSV path inside container (default /data/scenario_schedule.csv)
+  #   HTTP_PORT                            — schedule server port (default 8088)
+  #
+  # Scenario schedule HTTP endpoint  (no exec needed)
+  # ──────────────────────────────────────────────────
+  #   CSV:   curl http://localhost:8088/scenarios
+  #   JSON:  curl 'http://localhost:8088/scenarios?json' | python -m json.tool
+  # ──────────────────────────────────────────────────────────
+  troublemaker:
+    build:
+      context: ./troublemaker
+      dockerfile: Dockerfile
+    container_name: troublemaker
+    hostname: troublemaker
+    volumes:
+      # Persistent CSV schedule — survives container restarts and rebuilds.
+      - troublemaker-data:/data
+    environment:
+      FRONTEND_BASE_URL:     "http://frontend-api:8080"
+      # How long to sleep between rounds (seconds, picked randomly in range).
+      MIN_SLEEP_SECONDS:     "5"
+      MAX_SLEEP_SECONDS:     "25"
+      # How many requests to send in a burst scenario.
+      BURST_MIN:             "20"
+      BURST_MAX:             "50"
+      # How many requests to send in normal / mixed scenarios.
+      STEADY_REQUESTS:       "10"
+      # Per-request HTTP timeout (seconds).
+      REQUEST_TIMEOUT:       "15"
+      # Set to "false" to disable the corresponding scenario class.
+      ENABLE_BURSTS:         "true"
+      ENABLE_ERRORS:         "true"
+      ENABLE_SLOW_CALLS:     "true"
+      # Scenario schedule — CSV file location inside the container.
+      SCHEDULE_CSV_PATH:     "/data/scenario_schedule.csv"
+      # Port for the built-in schedule HTTP server.
+      HTTP_PORT:             "8088"
+    ports:
+      - "8088:8088"    # Scenario schedule  curl http://localhost:8088/scenarios
+    depends_on:
+      - frontend-api
+    networks:
+      - obs-net
+    restart: unless-stopped
+    profiles:
+      - troublemaker   # opt-in: won't start with plain "docker compose up"
+
+  # ──────────────────────────────────────────────────────────
+  # Alertmanager
+  #
+  # Receives firing alerts from Prometheus, groups/deduplicates them,
+  # and routes them to receivers (webhook, Slack, PagerDuty, etc.).
+  #
+  # In this AIOps integration, all alerts are routed to the compute-agent
+  # service which translates them into xyOps incident tickets.
+  #
+  # Data flow:
+  #   Prometheus (alert rule fires) → Alertmanager → compute-agent → xyOps
+  #
+  # Ports
+  # ─────
+  #   9093  Alertmanager web UI + API  http://localhost:9093
+  #         View active alerts, silences, and routing decisions here.
+  #         Very useful for debugging why an alert is not reaching xyOps.
+  #
+  # Config
+  # ──────
+  #   ./alertmanager/alertmanager.yml defines:
+  #     - Routing tree (which alerts go where)
+  #     - Inhibition rules (suppress warning when critical fires)
+  #     - Receivers (xyops-incidents → compute-agent webhook)
+  # ──────────────────────────────────────────────────────────
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    hostname: alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+      - "--web.listen-address=:9093"
+      - "--cluster.listen-address="     # single-instance, no HA clustering
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "9093:9093"    # Alertmanager UI  http://localhost:9093
+    depends_on:
+      - prometheus
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Compute Agent  (renamed from aiops-bridge)
+  #
+  # The compute-domain AIOps agent — receives Alertmanager webhooks
+  # for compute incidents and drives a 6-step AI pipeline:
+  #   1. Receives Alertmanager webhooks (POST /webhook)
+  #   2. Fetches metrics from Prometheus + logs from Loki
+  #   3. Runs AI analysis (OpenAI/Claude with deterministic fallback)
+  #   4. Creates enriched xyOps incident ticket
+  #   5. Routes through approval workflow
+  #   6. Executes Ansible playbook via ansible-runner
+  #
+  # Every xyOps ticket created contains:
+  #   - Service name, alert name, severity, risk_score
+  #   - Link to the Grafana dashboard
+  #   - The agent span's trace_id → click it → see the exact moment
+  #     in Tempo when the incident was detected
+  #
+  # Data flow:
+  #   Alertmanager → POST /webhook → compute-agent pipeline
+  #     → POST xyops:5522/api/app/create_ticket/v1
+  #     → OTel spans → otel-collector → Tempo
+  #
+  # Ports
+  # ─────
+  #   9000  Webhook endpoint  POST http://localhost:9000/webhook
+  #   9000  Health check      GET  http://localhost:9000/health
+  #   9000  Metrics           GET  http://localhost:9000/metrics
+  #
+  # To manually trigger a test alert:
+  #   curl -X POST http://localhost:9000/webhook \
+  #     -H "Content-Type: application/json" \
+  #     -d '{"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"TestAlert","service_name":"frontend-api","severity":"warning"},"annotations":{"summary":"Manual test alert","description":"Testing compute agent","dashboard_url":"http://localhost:3001"},"startsAt":"2026-03-16T10:00:00Z"}]}'
+  # ──────────────────────────────────────────────────────────
+  compute-agent:
+    build:
+      context: .
+      dockerfile: compute-agent/Dockerfile
+    container_name: compute-agent
+    hostname: compute-agent
+    environment:
+      # ── Target: xyOps ──────────────────────────────────────
+      XYOPS_URL: "http://xyops:5522"
+      # xyOps API key — set this after first xyOps login
+      # (Admin → API Keys → Create Key → copy here and restart bridge)
+      XYOPS_API_KEY: "zX-fwNcB5_oSR2jaMyRbtraPyj7rgUxP9bdCfiQ7pfk"
+
+      # ── AI enrichment ──────────────────────────────────
+      # OpenAI key — set in .env file (see .env.example)
+      # To switch model: change AI_MODEL below (e.g. gpt-4o, gpt-4-turbo).
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      AI_MODEL: "gpt-4o"
+      LOKI_URL: "http://loki:3100"
+      PROMETHEUS_URL: "http://prometheus:9090"
+
+      # ── Notifications ──────────────────────────────────
+      # comma-separated emails; critical alerts notify all, warning notifies first
+      NOTIFY_EMAIL: "omkar.umrani@gmail.com"             # e.g. "ops@company.com,sre@company.com"
+
+      # ── GitHub integration ─────────────────────────────
+      GITHUB_REPO: "https://github.com/omkarumarani/obseransiblerepo.git"              # e.g. "myorg/myapp"
+
+      # ── Approval workflow ─────────────────────────────
+      REQUIRE_APPROVAL: "true"     # set false to auto-execute without human sign-off
+      ANSIBLE_RUNNER_URL: "http://ansible-runner:8080"
+      BRIDGE_INTERNAL_URL: "http://compute-agent:9000"
+
+      # ── Obs-Intelligence Engine ───────────────────────────────
+      OBS_INTELLIGENCE_URL: "http://obs-intelligence:9100"
+
+      # ── Block F: Local LLM + ChromaDB ─────────────────────────
+      LOCAL_LLM_URL: "http://host.docker.internal:11434"
+      CHROMA_URL: "http://knowledge-store:8000"
+      LOCAL_LLM_MODEL: "llama3.2"   # faster model for demo (qwen3.5 too slow on CPU)
+      LOCAL_LLM_ENABLED: "true"
+
+      # ── Gitea git integration ────────────────────────────────
+      GITEA_URL: "http://gitea:3000"
+      GITEA_ADMIN_USER: "aiops"
+      GITEA_ADMIN_PASS: "Aiops1234!"
+      GITEA_ORG: "aiops-org"
+      GITEA_REPO: "ansible-playbooks"
+      GITEA_ENABLED: "true"
+
+      # ── Autonomy engine ────────────────────────────────────
+      # Optional: override service tiers via JSON (or mount /data/service_tiers.json)
+      # SERVICE_TIER_MAP_JSON: '{"frontend-api":"production","loadgen":"sandbox"}'
+      # Path for persistent approval history (survives restarts via volume below)
+      APPROVAL_HISTORY_PATH: "/data/approval_history.jsonl"
+
+      # ── Workflow step visibility ─────────────────────────────
+      # Each xyOps workflow node stays orange for this many seconds so you
+      # can watch the canvas step-by-step.  Set to 0 to disable.
+      WORKFLOW_STEP_DELAY_SECONDS: "5"
+      # Must match the xyOps container hostname (docker-compose: hostname: xyops)
+      XYOPS_SERVER_HOSTNAME: "xyops"
+
+      # ── n8n PRIMARY orchestrator ────────────────────────────
+      N8N_BASE_URL: "http://n8n:5678"
+      ENABLE_N8N: "true"
+      N8N_ORCHESTRATOR_TIMEOUT: "10"
+
+      # ── OTel identity ──────────────────────────────────────
+      OTEL_SERVICE_NAME: "compute-agent"
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=local,service.namespace=aiops"
+
+      # ── OTel export → collector ────────────────────────────
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+      OTEL_METRIC_EXPORT_INTERVAL_MS: "15000"
+    ports:
+      - "9000:9000"    # Compute agent HTTP  curl http://localhost:9000/health
+    volumes:
+      - ./obs-intelligence/scenarios:/app/scenarios:ro
+      - compute-agent-data:/data          # persistent approval history + tier config
+    depends_on:
+      - otel-collector
+      - alertmanager
+      - n8n
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # n8n — PRIMARY Orchestration Layer
+  #
+  # All agents route ticket creation, updates, comments,
+  # approvals, and remediations through n8n webhooks.
+  # n8n decides which backends to invoke: xyOps, ServiceNow,
+  # Ansible Runner, Slack, email, etc.
+  #
+  # Webhook endpoints (Master Orchestrator workflow):
+  #   POST /webhook/orchestrator/create-ticket
+  #   POST /webhook/orchestrator/update-ticket
+  #   POST /webhook/orchestrator/add-comment
+  #   POST /webhook/orchestrator/resolve-ticket
+  #   POST /webhook/orchestrator/create-approval
+  #   POST /webhook/orchestrator/execute-remediation
+  #   POST /webhook/orchestrator/notify
+  #
+  # Ports
+  # ─────
+  #   5679  n8n web UI + webhook endpoint  http://localhost:5679
+  #
+  # First-time setup:
+  # ─────────────────
+  #   1. Open http://localhost:5679
+  #   2. Complete the owner setup (email + password)
+  #   3. Import N8N/n8n_master_orchestrator.json as a workflow
+  #   4. Activate the workflow
+  # ──────────────────────────────────────────────────────────
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    hostname: n8n
+    environment:
+      # ── n8n core settings ──────────────────────────────────
+      N8N_HOST: "0.0.0.0"
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: "http"
+      WEBHOOK_URL: "http://n8n:5678"
+      GENERIC_TIMEZONE: "UTC"
+      N8N_LOG_LEVEL: "info"
+
+      # ── Backend URLs (used by n8n HTTP-Request nodes) ──────
+      XYOPS_URL: "http://xyops:5522"
+      XYOPS_API_KEY: "zX-fwNcB5_oSR2jaMyRbtraPyj7rgUxP9bdCfiQ7pfk"
+      ANSIBLE_RUNNER_URL: "http://ansible-runner:8080"
+      SERVICENOW_URL: "${SERVICENOW_URL:-http://mock-servicenow:8080}"
+      SERVICENOW_USER: "${SERVICENOW_USER:-admin}"
+      SERVICENOW_PASSWORD: "${SERVICENOW_PASSWORD:-admin}"
+
+      # ── OTel identity ──────────────────────────────────────
+      OTEL_SERVICE_NAME: "n8n"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+    ports:
+      - "5679:5678"    # n8n web UI  http://localhost:5679
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./N8N:/home/node/workflows:ro
+    depends_on:
+      - xyops
+      - otel-collector
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # xyOps
+  #
+  # The AIOps automation platform — job scheduler, monitor, alerter,
+  # ticketing system, and workflow engine in one.
+  #
+  # In this integration, xyOps serves as:
+  #   1. Incident management: receives tickets from compute-agent
+  #      whenever Prometheus alerts fire
+  #   2. Remediation engine: run jobs/workflows in response to tickets
+  #      (e.g., restart a service, scale up, clear a cache)
+  #   3. Audit trail: every ticket records the trace_id of when the
+  #      alert was detected, linking it to Tempo
+  #   4. Scheduler: xyOps's own HTTP server activity is traced with
+  #      OpenTelemetry — its spans appear in Tempo alongside app spans
+  #
+  # First-time setup (after docker compose up):
+  # ───────────────────────────────────────────
+  #   1. Open http://localhost:5522
+  #   2. Login: admin / admin
+  #   3. Go to Admin → API Keys → Create a new API key
+  #   4. Copy the key into the XYOPS_API_KEY env var in compute-agent above
+  #   5. docker compose restart compute-agent
+  #
+  # Ports
+  # ─────
+  #   5522  xyOps web UI + REST API  http://localhost:5522
+  #   5523  xyOps satellite WebSocket (internal, not used from host)
+  #
+  # Data persistence
+  # ────────────────
+  #   xyOps stores all data in /opt/xyops/data (SQLite + filesystem).
+  #   The xyops-data volume keeps your tickets, jobs, and config
+  #   across container restarts.
+  #
+  # OTel instrumentation
+  # ────────────────────
+  #   xyOps is instrumented via lib/telemetry.js using the Node.js OTel SDK.
+  #   HTTP requests, job executions, and API calls are automatically traced.
+  #   All spans flow to otel-collector → Tempo — searchable in Grafana
+  #   alongside your frontend-api and backend-api traces.
+  # ──────────────────────────────────────────────────────────
+  xyops:
+    build:
+      context: ./xyops-main
+      dockerfile: Dockerfile
+    container_name: xyops
+    hostname: xyops
+    volumes:
+      - xyops-data:/opt/xyops/data
+    environment:
+      # ── xyOps settings ─────────────────────────────────────
+      XYOPS_foreground: "true"
+      XYOPS_color: "true"
+
+      # ── OTel identity ──────────────────────────────────────
+      OTEL_SERVICE_NAME: "xyops"
+      DEPLOYMENT_ENVIRONMENT: "local"
+
+      # ── OTel export → collector ────────────────────────────
+      # xyOps lib/telemetry.js reads these env vars.
+      # Spans from xyOps job runs will appear in Tempo.
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+      OTEL_METRIC_EXPORT_INTERVAL_MS: "15000"
+    ports:
+      - "5522:5522"    # xyOps web UI  http://localhost:5522  (admin/admin)
+      - "5523:5523"    # xyOps satellite WebSocket (for remote agents)
+    depends_on:
+      - otel-collector
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # ansible-runner  (port 8090 on host → 8080 in container)
+  #
+  # Executes Ansible playbooks generated by Claude AI.
+  # Called by compute-agent approval_workflow.py after a human approves.
+  # Routes: GET /health   POST /run
+  #
+  # Set ANSIBLE_LIVE_MODE=true only when real target infrastructure exists.
+  # Default (false) returns a simulated dry-run PLAY RECAP so the pipeline
+  # works end-to-end in this learning environment without real hosts.
+  # ──────────────────────────────────────────────────────────────────────────
+  ansible-runner:
+    build:
+      context: ./ansible-runner
+      dockerfile: Dockerfile
+    container_name: ansible-runner
+    hostname: ansible-runner
+    environment:
+      ANSIBLE_LIVE_MODE: "false"
+      OTEL_SERVICE_NAME: "ansible-runner"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+    ports:
+      - "8090:8080"
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Gitea  (local self-hosted Git server)
+  #
+  # Stores AI-generated Ansible playbooks as pull-request branches.
+  # Every remediation approval creates a branch + PR in Gitea for audit
+  # trail and code review alongside the xyOps change ticket.
+  #
+  # First-time setup is automated by compute-agent on startup:
+  #   1. Bridge POSTs to /install to create admin user (aiops / Aiops1234!)
+  #   2. Bridge creates org "aiops-org" and repo "ansible-playbooks"
+  #   3. Bridge generates an API token used for all subsequent calls
+  #
+  # Ports
+  # ─────
+  #   3002  Gitea web UI  http://localhost:3002
+  #         Login: aiops / Aiops1234!
+  #         Repo:  http://localhost:3002/aiops-org/ansible-playbooks
+  #         PRs:   http://localhost:3002/aiops-org/ansible-playbooks/pulls
+  # ──────────────────────────────────────────────────────────
+  gitea:
+    image: gitea/gitea:1.21
+    container_name: gitea
+    hostname: gitea
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__server__DOMAIN=localhost
+      - GITEA__server__HTTP_PORT=3000
+      - GITEA__server__ROOT_URL=http://localhost:3002/
+      - GITEA__database__DB_TYPE=sqlite3
+      - GITEA__database__PATH=/data/gitea/gitea.db
+      - GITEA__log__LEVEL=Warn
+      - GITEA__service__DISABLE_REGISTRATION=false
+      - GITEA__security__INSTALL_LOCK=true
+      - GITEA__security__SECRET_KEY=aiops_local_dev_secret_key_for_gitea_bridge_2024
+    volumes:
+      - gitea-data:/data
+      - ./gitea/init.sh:/init.sh:ro
+    entrypoint: ["/bin/sh", "/init.sh"]
+    ports:
+      - "3002:3000"    # Gitea web UI  http://localhost:3002
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Storage Simulator
+  #
+  # Simulates Ceph OSD / pool / PVC storage failure scenarios.
+  # Exposes Prometheus metrics that Prometheus scrapes every 15s.
+  # Use POST /scenario/{name} to trigger specific failure modes:
+  #
+  #   Scenarios:
+  #     healthy          — baseline: all OSDs up, pool at 40%, low latency
+  #     osd_down         — one OSD offline, cluster WARN, 32 degraded PGs
+  #     multi_osd_failure— two OSDs offline, cluster ERROR, 128 degraded PGs
+  #     pool_full        — SSD pool at 95%, writes throttled
+  #     latency_spike    — all PVC latency 10-40x normal
+  #     noisy_pvc        — pvc-app-0 at 10x IOPS, neighbors starved
+  #
+  # Quick commands:
+  #   Trigger OSD failure:  curl -X POST http://localhost:9200/scenario/osd_down
+  #   List scenarios:       curl http://localhost:9200/scenarios
+  #   View metrics:         curl http://localhost:9200/metrics
+  #   Reset to healthy:     curl -X POST http://localhost:9200/scenario/healthy
+  #
+  # Ports
+  # ─────
+  #   9200  Simulator HTTP + /metrics endpoint
+  # ──────────────────────────────────────────────────────────
+  storage-simulator:
+    build:
+      context: ./storage-simulator
+      dockerfile: Dockerfile
+    container_name: storage-simulator
+    hostname: storage-simulator
+    ports:
+      - "9200:9200"    # Simulator API  http://localhost:9200/scenarios
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Storage Agent
+  #
+  # Storage-specialised AIOps agent — mirrors compute-agent but
+  # focuses on Ceph OSD / pool / PVC storage incidents.
+  #
+  # Alert routing:
+  #   Alertmanager routes all alerts with domain=storage here.
+  #   storage-agent runs the same 6-step AI pipeline as compute-agent
+  #   but with storage-aware metrics fetching and remediation.
+  #
+  # xyOps integration:
+  #   On startup, provisions the "Storage AIOps Agent Pipeline" workflow
+  #   (Scheduler → Workflows) for demo and manual testing.
+  #
+  # Autonomous actions (no approval):
+  #   - NoisyPVCDetected → PVC IO throttle
+  #
+  # Approval-gated actions:
+  #   - CephOSDDown → OSD reweight
+  #   - CephPoolFull/NearFull → pool expansion advisory
+  #   - PVCHighLatency → IO investigation
+  #
+  # Human-only (never automate):
+  #   - CephMultipleOSDDown → immediate SRE escalation
+  #
+  # Ports
+  # ─────
+  #   9001  Storage agent HTTP  GET /health  POST /webhook  GET /metrics
+  # ──────────────────────────────────────────────────────────
+  storage-agent:
+    build:
+      context: .
+      dockerfile: storage-agent/Dockerfile
+    container_name: storage-agent
+    hostname: storage-agent
+    environment:
+      # ── Target: xyOps ──────────────────────────────────────
+      XYOPS_URL: "http://xyops:5522"
+      XYOPS_API_KEY: "zX-fwNcB5_oSR2jaMyRbtraPyj7rgUxP9bdCfiQ7pfk"
+
+      # ── AI enrichment ──────────────────────────────────────
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      AI_MODEL: "gpt-4o"
+      LOKI_URL: "http://loki:3100"
+      PROMETHEUS_URL: "http://prometheus:9090"
+      STORAGE_SIMULATOR_URL: "http://storage-simulator:9200"
+
+      # ── Notifications ──────────────────────────────────────
+      NOTIFY_EMAIL: "omkar.umrani@gmail.com"
+
+      # ── Approval workflow ──────────────────────────────────
+      STORAGE_REQUIRE_APPROVAL: "true"    # set false to auto-execute without sign-off
+      ANSIBLE_RUNNER_URL: "http://ansible-runner:8080"
+      BRIDGE_INTERNAL_URL: "http://storage-agent:9001"
+
+      # ── Obs-Intelligence Engine ───────────────────────────────
+      OBS_INTELLIGENCE_URL: "http://obs-intelligence:9100"
+
+      # ── Block F: Local LLM + ChromaDB ─────────────────────────
+      LOCAL_LLM_URL: "http://host.docker.internal:11434"
+      CHROMA_URL: "http://knowledge-store:8000"
+      LOCAL_LLM_MODEL: "qwen3.5"
+      LOCAL_LLM_ENABLED: "true"
+
+      # ── Workflow step visibility ───────────────────────────
+      WORKFLOW_STEP_DELAY_SECONDS: "5"
+      XYOPS_SERVER_HOSTNAME: "xyops"
+
+      # ── n8n PRIMARY orchestrator ────────────────────────────
+      N8N_BASE_URL: "http://n8n:5678"
+      ENABLE_N8N: "true"
+      N8N_ORCHESTRATOR_TIMEOUT: "10"
+
+      # ── OTel identity ──────────────────────────────────────
+      OTEL_SERVICE_NAME: "storage-agent"
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=local,service.namespace=aiops"
+
+      # ── OTel export → collector ────────────────────────────
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+      OTEL_METRIC_EXPORT_INTERVAL_MS: "15000"
+    ports:
+      - "9001:9001"    # Storage agent HTTP  http://localhost:9001/health
+    volumes:
+      - ./obs-intelligence/scenarios:/app/scenarios:ro
+    depends_on:
+      - otel-collector
+      - alertmanager
+      - storage-simulator
+      - n8n
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Named volumes
+# Docker manages these on the host.  They survive "docker compose down" but are
+# deleted by "docker compose down -v".
+#
+#   prometheus-data    — Prometheus TSDB samples (metrics history)
+#   tempo-data         — Tempo trace blocks and WAL (trace history)
+#   loki-data          — Loki log chunks and WAL (log history)
+#   grafana-data       — Grafana sqlite DB, sessions, and user preferences
+#   troublemaker-data  — Scenario schedule CSV  (GET http://localhost:8088/scenarios)
+#   xyops-data         — xyOps SQLite DB, tickets, jobs, config (AIOps platform)
+# ──────────────────────────────────────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────
+  # Obs-Intelligence Engine
+  #
+  # Standalone intelligence microservice providing:
+  #   - Periodic anomaly detection (Z-score via Prometheus PromQL subqueries)
+  #   - Linear-regression metric forecasting (numpy)
+  #   - Pre-computed intelligence state for domain agents to consume
+  #   - Prometheus metrics: obs_intelligence_* gauges/counters
+  #
+  # Domain agents call GET /intelligence/current to enrich LLM context
+  # without running their own Prometheus analysis.
+  #
+  # Endpoints
+  # ─────────
+  #   9100  Health:      GET  http://localhost:9100/health
+  #   9100  Metrics:     GET  http://localhost:9100/metrics
+  #   9100  Intel state: GET  http://localhost:9100/intelligence/current
+  #   9100  On-demand:   POST http://localhost:9100/analyze
+  # ──────────────────────────────────────────────────────────
+  obs-intelligence:
+    build:
+      context: ./obs-intelligence
+      dockerfile: Dockerfile
+    container_name: obs-intelligence
+    hostname: obs-intelligence
+    environment:
+      # ── Data sources ────────────────────────────────────────
+      PROMETHEUS_URL: "http://prometheus:9090"
+      LOKI_URL: "http://loki:3100"
+
+      # ── AI enrichment ──────────────────────────────────────
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      OPENAI_MODEL: "gpt-4o"
+
+      # ── Anomaly detection tuning ────────────────────────────
+      ANOMALY_Z_THRESHOLD: "2.5"
+      ANOMALY_WINDOW_MINUTES: "30"
+
+      # ── Forecast tuning ────────────────────────────────────
+      FORECAST_HORIZON_MINUTES: "60"
+
+      # ── Block F: Local LLM + ChromaDB knowledge store ─────────────────────
+      LOCAL_LLM_URL: "http://host.docker.internal:11434"
+      CHROMA_URL: "http://knowledge-store:8000"
+      LOCAL_LLM_MODEL: "qwen3.5"
+      LOCAL_LLM_ENABLED: "true"
+      LOCAL_LLM_MIN_SIMILARITY: "0.82"
+      LOCAL_LLM_TOP_K: "5"
+      EXTERNAL_LLM_AUTHORITY: "true"
+      LOCAL_LLM_VALIDATION_ONLY: "true"
+
+      # ── OTel identity ──────────────────────────────────────
+      OTEL_SERVICE_NAME: "obs-intelligence"
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=local,service.namespace=aiops"
+
+      # ── OTel export → collector ────────────────────────────
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+      OTEL_METRIC_EXPORT_INTERVAL_MS: "15000"
+    ports:
+      - "9100:9100"    # Intelligence API  http://localhost:9100/health
+    volumes:
+      - ./obs-intelligence/scenarios:/app/scenarios:ro
+      - obs-intelligence-data:/data      # persists outcomes.db (BLOCK B feedback loop)
+    depends_on:
+      - prometheus
+      - loki
+      - otel-collector
+      - knowledge-store
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Local LLM (Ollama)  — Block F: local validator + embedder
+  #
+  # Hosts qwen3.5 for incident corroboration and nomic-embed-text
+  # for ChromaDB vector embeddings.  Both models are pulled on first
+  # startup (~2-3 GB).  Subsequent starts reuse the ollama-data volume.
+  #
+  # The pipeline degrades gracefully when this service is unavailable:
+  # local validation returns status="unavailable" and the external LLM
+  # result is used unchanged.
+  #
+  # Ports
+  # ─────
+  #   11434  Ollama REST API  POST /api/generate  POST /api/embeddings
+  # ──────────────────────────────────────────────────────────
+  local-llm:
+    image: ollama/ollama:latest
+    container_name: local-llm
+    hostname: local-llm
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    entrypoint: ["/bin/sh", "-c",
+      "ollama serve & sleep 5 && ollama pull qwen3.5 && ollama pull nomic-embed-text && wait"]
+    restart: unless-stopped
+    networks:
+      - obs-net
+
+  # ──────────────────────────────────────────────────────────
+  # Knowledge Store (ChromaDB)  — Block F: vector similarity store
+  #
+  # Persists incident embeddings for cosine similarity retrieval.
+  # Used by local_llm_enricher.py to find the top-K similar past
+  # incidents before running local LLM validation.
+  #
+  # Ports
+  # ─────
+  #   8020 → 8000  ChromaDB HTTP API
+  # ──────────────────────────────────────────────────────────
+  knowledge-store:
+    image: chromadb/chroma:latest
+    container_name: knowledge-store
+    hostname: knowledge-store
+    ports:
+      - "8020:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+    networks:
+      - obs-net
+
+  # ──────────────────────────────────────────────────────────
+  # UI Backend (Aggregator API)
+  #
+  # FastAPI service that aggregates data from multiple backend services
+  # (compute-agent, storage-agent, obs-intelligence, Gitea, xyOps) and
+  # exposes a unified API for the React frontend.
+  #
+  # Why a separate aggregator?
+  # ───────────────────────────
+  # The browser should NEVER call internal services directly. This service
+  # acts as a BFF (Backend for Frontend) that:
+  #   - Consolidates data from multiple sources
+  #   - Handles authentication/authorization centrally
+  #   - Provides simplified endpoints tailored for UI needs
+  #   - Enables CORS for browser access
+  #
+  # Endpoints
+  # ─────────
+  #   GET  /pipeline/history          — all completed pipeline runs
+  #   GET  /pipeline/session/{id}     — live session state
+  #   GET  /pipeline/session/{id}/snapshot — full historical playback data
+  #   GET  /scenarios                 — all 20 scenarios with stats
+  #   GET  /scenarios/{id}            — scenario detail with history
+  #   GET  /autonomy/status           — current autonomy tier status
+  #   GET  /health                    — health check
+  #
+  # Data sources
+  # ────────────
+  #   compute-agent:9000    — compute domain pipeline state
+  #   storage-agent:9001    — storage domain pipeline state
+  #   obs-intelligence:9100 — anomaly detection, forecasting
+  #   gitea:3000            — PR links, playbook branches
+  #   xyops:5522            — incident tickets, workflow status
+  #
+  # Ports
+  # ─────
+  #   9005  UI Backend API  http://localhost:9005
+  # ──────────────────────────────────────────────────────────
+  ui-backend:
+    build:
+      context: ./ui-backend
+      dockerfile: Dockerfile
+    container_name: ui-backend
+    hostname: ui-backend
+    environment:
+      # ── Service endpoints ───────────────────────────────────
+      COMPUTE_AGENT_URL: "http://compute-agent:9000"
+      STORAGE_AGENT_URL: "http://storage-agent:9001"
+      OBS_INTELLIGENCE_URL: "http://obs-intelligence:9100"
+      GITEA_URL: "http://gitea:3000"
+      XYOPS_URL: "http://xyops:5522"
+      PROMETHEUS_URL: "http://prometheus:9090"
+      LOKI_URL: "http://loki:3100"
+
+      # ── API keys ────────────────────────────────────────────
+      XYOPS_API_KEY: "zX-fwNcB5_oSR2jaMyRbtraPyj7rgUxP9bdCfiQ7pfk"
+      GITEA_TOKEN: "${GITEA_TOKEN:-}"
+
+      # ── Persistent storage ──────────────────────────────────
+      # Pipeline history stored in SQLite for playback feature
+      DB_PATH: "/data/pipeline_history.db"
+      PIPELINE_SESSIONS_DB_PATH: "/compute-data/pipeline.db"
+
+      # ── OTel identity ──────────────────────────────────────
+      OTEL_SERVICE_NAME: "ui-backend"
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=local,service.namespace=aiops"
+
+      # ── OTel export → collector ────────────────────────────
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+      OTEL_METRIC_EXPORT_INTERVAL_MS: "15000"
+    ports:
+      - "9005:9005"    # UI Backend API  http://localhost:9005
+    volumes:
+      - ui-backend-data:/data
+      - compute-agent-data:/compute-data:ro
+    depends_on:
+      - compute-agent
+      - storage-agent
+      - obs-intelligence
+      - gitea
+      - xyops
+      - otel-collector
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # AIOps UI (Production Build)
+  #
+  # Nginx serving the production-optimized React build.
+  # This is the PRODUCTION entry point for the Command Center UI.
+  # The browser accesses this, and it proxies API calls to ui-backend:9005.
+  #
+  # Why separate from command-center?
+  # ──────────────────────────────────
+  # The existing command-center service runs a dev server (Vite/webpack-dev-server).
+  # This service serves the production build for performance and proper
+  # HTTP caching headers.
+  #
+  # Nginx configuration:
+  # ────────────────────
+  #   - Serve static files from /usr/share/nginx/html (React build artifacts)
+  #   - Proxy /api/* requests to ui-backend:9005
+  #   - Enable gzip compression
+  #   - Set cache headers for assets
+  #
+  # Ports
+  # ─────
+  #   3005  AIOps UI  http://localhost:3005
+  # ──────────────────────────────────────────────────────────
+  aiops-ui:
+    image: nginx:1.25-alpine
+    container_name: aiops-ui
+    hostname: aiops-ui
+    volumes:
+      - ./command-center/dist:/usr/share/nginx/html:ro
+      - ./aiops-ui/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "3005:80"    # AIOps UI  http://localhost:3005
+    depends_on:
+      - ui-backend
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # AIOps Command Center (Development Server)
+  #
+  # React + TypeScript single-page application for real-time
+  # agent workflow visualization with playback capability.
+  #
+  # Features:
+  #   - Live pipeline view (horizontal node graph with React Flow)
+  #   - Agent status color-coding (idle/running/success/failed/skipped)
+  #   - Click agent → opens side drawer with full JSON output
+  #   - Incident dashboard (risk score, scenario match, autonomy decision)
+  #   - Trust score progress bar ("X / Y approvals to graduate")
+  #   - Real-time polling (3s interval) OR WebSocket
+  #   - Session selector (switch between active incidents)
+  #
+  # API Integration:
+  #   All requests proxied via Vite to ui-backend:9005
+  #     GET /api/pipeline/history
+  #     GET /api/pipeline/session/{id}
+  #     GET /api/scenarios
+  #     GET /api/autonomy/status
+  #
+  # Ports
+  # ─────
+  #   3500  Command Center UI (dev)  http://localhost:3500
+  #
+  # Note: This is the DEVELOPMENT server. For production, use aiops-ui
+  #       service which serves the optimized build via Nginx.
+  # ──────────────────────────────────────────────────────────
+  command-center:
+    build:
+      context: ./command-center
+      dockerfile: Dockerfile
+    container_name: command-center
+    hostname: command-center
+    environment:
+      VITE_API_BASE_URL: "http://ui-backend:9005"
+    ports:
+      - "3500:3000"    # Command Center UI (dev)  http://localhost:3500
+    depends_on:
+      - ui-backend
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Streamlit Dashboard (replaces React Command Center UI)
+  #
+  # Lightweight observability dashboard for the AIOps platform.
+  # Read-only interface that queries existing agent APIs.
+  #
+  # Features
+  # ────────
+  #   Dashboard: System health, intelligence status, approval statistics
+  #   Pipeline:  Execution status and audit trail
+  #   Approvals: Pending tasks (xyOps is source of truth)
+  #   Settings:  Configuration reference
+  #
+  # Access
+  # ──────
+  #   http://localhost:8501
+  #
+  # Configuration
+  # ─────────────
+  #   Queries agent APIs directly (no new backend endpoints)
+  #   Fully backward compatible with existing xyOps workflow
+  # ──────────────────────────────────────────────────────────
+  ui-streamlit:
+    build:
+      context: ./ui-streamlit
+      dockerfile: Dockerfile
+    container_name: ui-streamlit
+    hostname: ui-streamlit
+    environment:
+      COMPUTE_AGENT_URL: "http://compute-agent:9000"
+      STORAGE_AGENT_URL: "http://storage-agent:9001"
+      OBS_INTELLIGENCE_URL: "http://obs-intelligence:9100"
+      XYOPS_URL: "http://xyops:5522"
+    ports:
+      - "8501:8501"    # Streamlit UI  http://localhost:8501
+    depends_on:
+      - compute-agent
+      - storage-agent
+      - obs-intelligence
+    networks:
+      - obs-net
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+    driver: local
+  tempo-data:
+    driver: local
+  loki-data:
+    driver: local
+  grafana-data:
+    driver: local
+  troublemaker-data:
+    driver: local
+  xyops-data:
+    driver: local
+  gitea-data:
+    driver: local
+  compute-agent-data:
+    driver: local
+  obs-intelligence-data:
+    driver: local
+  ui-backend-data:
+    driver: local
+  ollama-data:
+    driver: local
+  chroma-data:
+    driver: local
+  n8n-data:
+    driver: local

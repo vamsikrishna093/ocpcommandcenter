@@ -1,0 +1,127 @@
+{
+  "name": "🤖 Master Orchestrator - Fixed",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "aiops/master",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "webhook_master",
+      "name": "Webhook: Alert Received",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [100, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "const alert = items[0].json.alerts?.[0] || items[0].json;\nreturn [{\n  json: {\n    alert_name: alert.labels?.alertname || 'UnknownAlert',\n    service_name: alert.labels?.service_name || 'unknown',\n    severity: alert.labels?.severity || 'info',\n    description: alert.annotations?.description || 'No description',\n    trace_id: 'trace_' + Math.random().toString(16).slice(2, 18)\n  }\n}];"
+      },
+      "id": "parse_alert",
+      "name": "Parse Alert Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 100]
+    },
+    {
+      "parameters": {
+        "url": "http://n8n:5678/webhook/aiops/pre-enrichment",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "application/json",
+        "jsonBody": "{\"alert_name\": \"={{$node[\\\"Parse Alert Data\\\"].json.alert_name}}\", \"service_name\": \"={{$node[\\\"Parse Alert Data\\\"].json.service_name}}\", \"severity\": \"={{$node[\\\"Parse Alert Data\\\"].json.severity}}\"}"
+      },
+      "id": "agent_enrichment",
+      "name": "🔍 Agent #1: Pre-Enrichment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [500, 50]
+    },
+    {
+      "parameters": {
+        "url": "http://n8n:5678/webhook/aiops/smart-router",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "application/json",
+        "jsonBody": "{\"alert_data\": {{$node[\\\"Parse Alert Data\\\"].json}}}"
+      },
+      "id": "agent_router",
+      "name": "🎯 Agent #2: Smart Router",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [500, 150]
+    },
+    {
+      "parameters": {
+        "url": "http://ollama:11434/api/generate",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "application/json",
+        "jsonBody": "{\"model\": \"mistral\", \"prompt\": \"Alert: {{$node[\\\"Parse Alert Data\\\"].json.alert_name}} Service: {{$node[\\\"Parse Alert Data\\\"].json.service_name}} Analyze and provide root cause\", \"stream\": false}"
+      },
+      "id": "agent_ai",
+      "name": "🧠 Agent #3: AI Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [700, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "return [{\n  json: {\n    decision: 'CREATE_TICKET',\n    ticket_data: {\n      subject: '[' + $node['Parse Alert Data'].json.severity + '] ' + $node['Parse Alert Data'].json.alert_name,\n      description: $node['Parse Alert Data'].json.description,\n      service: $node['Parse Alert Data'].json.service_name,\n      severity: $node['Parse Alert Data'].json.severity,\n      trace_id: $node['Parse Alert Data'].json.trace_id\n    }\n  }\n}];"
+      },
+      "id": "decision_logic",
+      "name": "⚡ Autonomous Decision Logic",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 100]
+    },
+    {
+      "parameters": {
+        "url": "http://aiops-bridge:9000/webhook",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "application/json",
+        "jsonBody": "{\"status\": \"processing\", \"ticket_data\": {{$node[\\\"⚡ Autonomous Decision Logic\\\"].json.ticket_data}}}"
+      },
+      "id": "create_ticket",
+      "name": "🎫 Create Ticket in xyOps",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1100, 100]
+    },
+    {
+      "parameters": {
+        "responseBody": "{\"status\": \"complete\", \"message\": \"Orchestration finished\"}"
+      },
+      "id": "respond_webhook",
+      "name": "✅ Return Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1300, 100]
+    }
+  ],
+  "connections": {
+    "Webhook: Alert Received": {
+      "main": [[{"node": "Parse Alert Data", "type": "main", "index": 0}]]
+    },
+    "Parse Alert Data": {
+      "main": [[{"node": "🔍 Agent #1: Pre-Enrichment", "type": "main", "index": 0}, {"node": "🎯 Agent #2: Smart Router", "type": "main", "index": 0}]]
+    },
+    "🔍 Agent #1: Pre-Enrichment": {
+      "main": [[{"node": "🧠 Agent #3: AI Analysis", "type": "main", "index": 0}]]
+    },
+    "🎯 Agent #2: Smart Router": {
+      "main": [[{"node": "🧠 Agent #3: AI Analysis", "type": "main", "index": 0}]]
+    },
+    "🧠 Agent #3: AI Analysis": {
+      "main": [[{"node": "⚡ Autonomous Decision Logic", "type": "main", "index": 0}]]
+    },
+    "⚡ Autonomous Decision Logic": {
+      "main": [[{"node": "🎫 Create Ticket in xyOps", "type": "main", "index": 0}]]
+    },
+    "🎫 Create Ticket in xyOps": {
+      "main": [[{"node": "✅ Return Response", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false
+}

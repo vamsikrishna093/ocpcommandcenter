@@ -1,0 +1,49 @@
+{
+  "name": "AIOps: Post-Approval Slack Workflow",
+  "description": "Sends AI analysis to Slack for human approval with interactive buttons",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "path": "aiops/post-approval",
+        "responseMode": "onReceived"
+      },
+      "id": "webhook-analysis",
+      "name": "Webhook: Analysis Input",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://aiops-bridge:8080/api/ticket/create",
+        "sendBody": true,
+        "contentType": "application/json",
+        "body": "={\"incident_id\": \"{{ $json.analysis_id }}\", \"decision\": \"approved\"}"
+      },
+      "id": "create-approved-ticket",
+      "name": "Bridge: Create Approved Ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [800, 150]
+    },
+    {
+      "parameters": {},
+      "id": "response-webhook",
+      "name": "Respond: Approval Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1050, 300]
+    }
+  ],
+  "connections": {
+    "webhook-analysis": {
+      "main": [[{"node": "create-approved-ticket", "type": "main", "index": 0}]]
+    },
+    "create-approved-ticket": {
+      "main": [[{"node": "response-webhook", "type": "main", "index": 0}]]
+    }
+  }
+}
